@@ -1,0 +1,591 @@
+import os
+import random
+import time
+import sys
+import ctypes
+import win32gui
+
+# 检查是否以管理员身份运行，如果不是则尝试以管理员身份重启
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def run_as_admin():
+    try:
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    except:
+        print("无法以管理员身份运行程序")
+        sys.exit(1)
+
+# 如果不是以管理员身份运行，则尝试以管理员身份重启
+if not is_admin():
+    run_as_admin()
+
+import cv2
+# 检查CUDA支持
+try:
+    cuda_enabled = cv2.cuda.getCudaEnabledDeviceCount() > 0
+except:
+    cuda_enabled = False
+
+import numpy as np
+import pyautogui
+import win32api
+import win32con
+
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, QMessageBox, QHBoxLayout, QLineEdit
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt, QEventLoop
+from PyQt5.QtGui import QIcon, QKeySequence, QPixmap, QColor
+import PyQt5.QtGui as QtGui
+
+
+# 日志更新信号类
+class LogSignal(QThread):
+    log_updated = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self.logs = []
+    
+    def output_log(self, message):
+        self.log_updated.emit(message)
+        # 同时输出到控制台
+        print(message)
+
+# 主窗口类
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.log_signal = LogSignal()
+        self.init_ui()
+        self.setup_logger()
+        # 确保窗口能接收键盘事件
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def init_ui(self):
+        self.setWindowTitle('自动点击程序')
+        self.setGeometry(100, 100, 500, 300)  # 缩小窗口高度
+        self.setFocusPolicy(Qt.StrongFocus)  # 确保窗口能接收键盘事件
+
+        layout = QVBoxLayout()
+
+        # 日志显示区域（扩大）
+        log_layout = QVBoxLayout()
+        log_label = QLabel('日志')
+        log_layout.addWidget(log_label)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMinimumHeight(200)  # 增加高度
+        log_layout.addWidget(self.log_text)
+        layout.addLayout(log_layout)
+
+        # 运行间隔输入框
+        interval_layout = QHBoxLayout()
+        interval_label = QLabel('运行间隔(秒) [最低5秒]')
+        self.interval_input = QLineEdit()  # 使用QLineEdit代替QTextEdit
+        self.interval_input.setMaximumWidth(50)
+        self.interval_input.setText("5")  # 默认值为5秒
+        # 将事件处理改为在焦点离开时进行校验
+        self.interval_input.focusOutEvent = self.interval_input_focus_out_event
+        self.interval_input.mousePressEvent = self.interval_input_mouse_press_event
+        interval_layout.addWidget(interval_label)
+        interval_layout.addWidget(self.interval_input)
+        
+        # GPU加速开关按钮
+        self.gpu_button = QPushButton('GPU加速 开')  # 修改按钮文本
+        self.gpu_button.clicked.connect(self.toggle_gpu_acceleration)
+        # 如果不支持GPU，则禁用按钮
+        if not cuda_enabled:
+            self.gpu_button.setEnabled(False)
+        interval_layout.addWidget(self.gpu_button)
+        
+        # 时钟图标
+        clock_icon = QLabel()
+        clock_icon.setPixmap(QPixmap("clock_icon.png").scaled(20, 20))
+        interval_layout.addWidget(clock_icon)
+        
+        layout.addLayout(interval_layout)
+
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        
+        # 开始挂机按钮
+        self.start_button = QPushButton('开始挂机')
+        self.start_button.clicked.connect(self.start_clicker)
+        button_layout.addWidget(self.start_button)
+        
+        # 退出按钮
+        self.close_button = QPushButton('退出')
+        self.close_button.clicked.connect(self.stop_program)
+        button_layout.addWidget(self.close_button)
+        
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+        # 添加状态变量
+        self.is_running = False  # 记录是否正在运行
+        self.has_shown_gpu_info = False  # 记录是否已显示GPU信息和初始化提示
+
+        # 设置快捷键
+        self.setWindowFlags(Qt.WindowStaysOnTopHint)
+        
+    def interval_input_focus_out_event(self, event):
+        # 当用户完成输入并退出输入框时，检查数值是否小于5
+        try:
+            value = int(self.interval_input.text())
+            if value < 5:
+                # 自动将输入框内的数字改为5
+                self.interval_input.setText("5")
+        except ValueError:
+            # 如果不是有效数字，设置为默认值5
+            self.interval_input.setText("5")
+        QLineEdit.focusOutEvent(self.interval_input, event)
+        
+    def interval_input_mouse_press_event(self, event):
+        # 用户点击输入框时自动选中全部数字
+        self.interval_input.selectAll()
+        QLineEdit.mousePressEvent(self.interval_input, event)
+        
+    def mousePressEvent(self, event):
+        # 点击窗口任意位置时，如果焦点在输入框上，则清除焦点
+        if self.interval_input.hasFocus():
+            self.interval_input.clearFocus()
+        super().mousePressEvent(event)
+        
+    def toggle_gpu_acceleration(self):
+        global cuda_enabled
+        # 只有在支持GPU时才允许切换
+        if cuda_enabled:
+            cuda_enabled = not cuda_enabled
+            if cuda_enabled:
+                self.gpu_button.setText('强制使用GPU加速')
+                self.output_log("强制使用GPU加速")
+            else:
+                self.gpu_button.setText('GPU加速 开')
+                self.output_log("关闭GPU加速")
+
+    def setup_logger(self):
+        self.log_signal.log_updated.connect(self.update_log_display)
+        
+    def keyPressEvent(self, event):
+        # F12键停止/继续
+        if event.key() == Qt.Key_F12:
+            if not self.is_running:
+                # 如果未运行，则启动
+                self.start_clicker()
+            else:
+                # 如果正在运行，则停止
+                self.stop_clicker()
+        else:
+            super().keyPressEvent(event)
+        
+    def update_log_display(self, message):
+        # 只在GUI中显示简洁的信息
+        if not message.startswith("查找图片") and "相似度" not in message and "被遮挡" not in message:
+            # 检查消息中是否包含特定关键词并设置相应颜色
+            if message == "已开始":
+                # 绿色显示
+                self.log_text.setTextColor(Qt.green)
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            elif message == "已暂停":
+                # 红色显示
+                self.log_text.setTextColor(Qt.red)
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            elif "注意" in message:
+                # 红色显示"注意"
+                self.log_text.setTextColor(Qt.red)
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            elif "提示" in message:
+                # 青金石色显示"提示"
+                self.log_text.setTextColor(QColor(35, 80, 150))  # 青金石色
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            elif "简朴无谓" in message:
+                # 蓝色显示"简朴无谓"
+                self.log_text.setTextColor(Qt.blue)
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            elif "发现" in message and "按钮" in message:
+                # 青金石色显示检测到按钮的信息
+                self.log_text.setTextColor(QColor(35, 80, 150))  # 青金石色
+                self.log_text.append(message)
+                self.log_text.setTextColor(Qt.black)  # 恢复默认颜色
+            else:
+                self.log_text.append(message)
+        else:
+            # 详细日志只输出到控制台
+            print(message)
+            
+    def output_log(self, message):
+        # 只在GUI中显示简洁的信息
+        if not message.startswith("查找图片") and "相似度" not in message and "被遮挡" not in message:
+            self.log_signal.output_log(message)
+        else:
+            # 详细日志只输出到控制台
+            print(message)
+            
+    def stop_program(self):
+        self.output_log("程序已停止。")
+        QApplication.quit()
+        
+    def stop_clicker(self):
+        if self.is_running:
+            if hasattr(self, 'clicker'):
+                self.clicker.stop()
+                # 不再等待线程结束，避免卡死
+                self.is_running = False
+                self.start_button.setText('开始挂机')  # 恢复按钮文本
+                # 只有在支持GPU时才启用GPU按钮
+                if cuda_enabled:
+                    self.gpu_button.setEnabled(True)  # 启用GPU按钮
+                # 显示暂停提示
+                self.output_log("已暂停")
+
+    def start_clicker(self):
+        if not self.is_running:
+            # 启动自动点击器
+            self.clicker = AutoClicker(self)
+            self.clicker.start()
+            self.is_running = True
+            self.start_button.setText('停止挂机')  # 更新按钮文本
+            self.gpu_button.setEnabled(False)  # 禁用GPU按钮
+            # 显示开始提示
+            self.output_log("已开始")
+        else:
+            # 停止挂机
+            if hasattr(self, 'clicker'):
+                self.clicker.stop()
+                # 不再等待线程结束，避免卡死
+                self.is_running = False
+                self.start_button.setText('开始挂机')  # 恢复按钮文本
+                # 只有在支持GPU时才启用GPU按钮
+                if cuda_enabled:
+                    self.gpu_button.setEnabled(True)  # 启用GPU按钮
+                # 显示暂停提示
+                self.output_log("已暂停")
+
+    def get_interval(self):
+        try:
+            value = int(self.interval_input.text())
+            # 设置最低轮询间隔为5秒
+            if value < 5:
+                return 5  # 最低5秒
+            return value
+        except:
+            return 5  # 默认值为5秒
+
+
+# 图像查找和点击类
+class ImageFinder:
+    def __init__(self, logger):
+        self.logger = logger
+    
+    # 使用OpenCV进行特征匹配
+    def find_image_with_feature_matching(self, target_picture):
+        try:
+            # 加载目标图片
+            target_image = cv2.imread(target_picture, cv2.IMREAD_GRAYSCALE)
+            if target_image is None:
+                self.logger(f"无法加载目标图片 {target_picture}，请检查路径！")
+                return None
+
+            # 截取屏幕
+            screenshot = pyautogui.screenshot()
+            screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
+            
+            # 强制使用GPU加速（如果启用）
+            if cuda_enabled:
+                try:
+                    gpu_screenshot = cv2.cuda_GpuMat()
+                    gpu_screenshot.upload(screenshot)
+                    screenshot_to_use = gpu_screenshot
+                    
+                    # 强制在GPU上处理
+                    gpu_target = cv2.cuda_GpuMat()
+                    gpu_target.upload(target_image)
+                except Exception as e:
+                    # 如果GPU上传失败，则回退到CPU
+                    print(f"GPU上传失败，回退到CPU处理: {e}")
+                    screenshot_to_use = screenshot
+                    gpu_target = None
+            else:
+                screenshot_to_use = screenshot
+                gpu_target = None
+
+            # 减少尺度检测点数量以降低CPU占用
+            scales = np.linspace(0.3, 2.5, 10)  # 调整范围以提高识别率
+            max_val_global = -1
+            best_match = None
+
+            for scale in scales:
+                # 调整模板大小
+                if cuda_enabled and gpu_target is not None:
+                    try:
+                        # 在GPU上调整大小
+                        resized_gpu_template = cv2.cuda.resize(gpu_target, (0, 0), fx=scale, fy=scale)
+                        resized_template = resized_gpu_template.download()
+                    except:
+                        # 回退到CPU
+                        resized_template = cv2.resize(target_image, None, fx=scale, fy=scale)
+                else:
+                    resized_template = cv2.resize(target_image, None, fx=scale, fy=scale)
+                
+                # 如果调整后的模板比屏幕截图还大，则跳过
+                if resized_template.shape[0] > screenshot.shape[0] or resized_template.shape[1] > screenshot.shape[1]:
+                    continue
+
+                # 执行模板匹配
+                if cuda_enabled and gpu_target is not None:
+                    try:
+                        # 尝试在GPU上执行匹配
+                        gpu_resized_template = cv2.cuda_GpuMat()
+                        gpu_resized_template.upload(resized_template)
+                        gpu_result = cv2.cuda.matchTemplate(gpu_resized_template, screenshot_to_use, cv2.TM_CCOEFF_NORMED)
+                        result_host = gpu_result.download()
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result_host)
+                    except Exception as e:
+                        # 如果GPU处理失败，则回退到CPU
+                        print(f"GPU处理失败，回退到CPU处理: {e}")
+                        result = cv2.matchTemplate(screenshot, resized_template, cv2.TM_CCOEFF_NORMED)
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                else:
+                    result = cv2.matchTemplate(screenshot, resized_template, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 更新最佳匹配
+                if max_val > max_val_global:
+                    max_val_global = max_val
+                    best_match = {
+                        'location': max_loc,
+                        'template_height': resized_template.shape[0],
+                        'template_width': resized_template.shape[1],
+                        'scale': scale
+                    }
+
+            # 设置匹配阈值为0.7，过滤掉低于0.7相似度的结果
+            if max_val_global > 0.7:  # 提高阈值到0.7以提高准确性
+                top_left = best_match['location']
+                bottom_right = (top_left[0] + best_match['template_width'], top_left[1] + best_match['template_height'])
+                
+                # 计算中心点
+                center_x = (top_left[0] + bottom_right[0]) // 2
+                center_y = (top_left[1] + bottom_right[1]) // 2
+                
+                # 构造返回值，使其与原来函数的返回格式一致
+                pts = np.array([
+                    [[top_left[0], top_left[1]]],
+                    [[top_left[0], bottom_right[1]]],
+                    [[bottom_right[0], bottom_right[1]]],
+                    [[bottom_right[0], top_left[1]]]
+                ], dtype=np.float32)
+                
+                self.logger(f"找到目标图片 {os.path.basename(target_picture)} (相似度: {max_val_global:.2f}, 缩放比例: {best_match['scale']:.2f})")
+                return pts
+            else:
+                # 只有在阈值较高时才提示可能的遮挡问题（不在控制台显示）
+                if max_val_global > 0.4:
+                    # GUI显示提示，但不在控制台输出
+                    message = f"疑似目标图片 {os.path.basename(target_picture)} 被遮挡或尺寸不匹配 (相似度: {max_val_global:.2f})，请勿遮挡游戏窗口"
+                    # 直接打印简化的信息到控制台
+                    print(f"未找到目标图片 {os.path.basename(target_picture)} (最高相似度: {max_val_global:.2f})")
+                else:
+                    print(f"未找到目标图片 {os.path.basename(target_picture)} (最高相似度: {max_val_global:.2f})")
+                return None
+
+        except Exception as e:
+            # 直接打印错误信息到控制台而不是使用logger
+            print(f"查找图片 {os.path.basename(target_picture)} 时发生错误：{e}")
+            return None
+
+
+    # 查找并点击目标图片
+    def find_and_click_image(self, target_picture):
+        try:
+            location = self.find_image_with_feature_matching(target_picture)
+            if location is not None:
+                # 计算点击位置（取目标图片的中心点）
+                center_x = int((location[0][0][0] + location[2][0][0]) / 2)
+                center_y = int((location[0][0][1] + location[2][0][1]) / 2)
+
+                # 根据图片名称显示不同的提示信息（带颜色标识）
+                if "1.png" in target_picture:
+                    self.logger("<font color='green'>发现准备按钮</font>")
+                elif "2.png" in target_picture:
+                    self.logger("<font color='blue'>发现下载按钮</font>")
+                elif "3.png" in target_picture:
+                    self.logger("<font color='red'>发现开始按钮</font>")
+                else:
+                    self.logger(f"找到目标图片，点击位置：({center_x}, {center_y})")
+
+                # 获取当前活动窗口的句柄
+                hwnd = win32gui.GetForegroundWindow()
+                
+                # 检查窗口句柄是否有效
+                if hwnd != 0:
+                    try:
+                        # 尝试确保目标窗口处于活动状态
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.1)  # 等待窗口激活
+                        
+                        # 向目标窗口发送点击事件
+                        self.send_click_to_window(hwnd, center_x, center_y)
+                    except Exception as inner_e:
+                        # 忽略特定的SetForegroundWindow错误，只打印其他错误
+                        if "SetForegroundWindow" not in str(inner_e):
+                            print(f"窗口操作时发生错误：{inner_e}")
+                else:
+                    print("无效的窗口句柄，跳过点击操作")
+                    
+                return True
+            else:
+                # 根据图片名称显示不同的未找到提示信息
+                if "1.png" in target_picture:
+                    pass  # 不显示未找到准备按钮的信息
+                elif "2.png" in target_picture:
+                    pass  # 不显示未找到下载按钮的信息
+                elif "3.png" in target_picture:
+                    pass  # 不显示未找到开始按钮的信息
+                else:
+                    self.logger("屏幕上未找到目标图片")
+                
+                return False
+        except Exception as e:
+            # 直接打印错误信息到控制台而不是使用logger
+            print(f"查找图片时发生错误：{e}")
+            return False
+
+    # 向目标窗口发送鼠标点击事件
+    def send_click_to_window(self, hwnd, x, y):
+        try:
+            # 提前松开鼠标
+            pyautogui.mouseUp()
+            
+            # 移动鼠标到目标位置
+            pyautogui.moveTo(x, y)
+            
+            # 按下鼠标左键
+            pyautogui.mouseDown()
+            
+            # 固定等待时间300ms
+            time.sleep(0.3)  # 300ms
+            
+            # 松开鼠标左键
+            pyautogui.mouseUp()
+            
+            # 等待一小段时间以确保点击被处理
+            time.sleep(0.1)
+            
+            self.logger(f"模拟点击位置：({x}, {y})，点击持续时间：300ms")
+        except Exception as e:
+            self.logger(f"发送点击事件时发生错误：{e}")
+
+
+# 主程序类
+class AutoClicker(QThread):
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.image_finder = ImageFinder(window.output_log)
+        self.running = True
+        self.timer = None
+        
+    def run(self):
+        try:
+            # 目标图片路径（假设图片在程序文件夹内）
+            self.image_paths = [
+                os.path.join(os.getcwd(), "1.png"),
+                os.path.join(os.getcwd(), "2.png"),
+                os.path.join(os.getcwd(), "3.png")
+            ]
+            
+            # 检查图片文件是否存在
+            for image_path in self.image_paths:
+                if not os.path.exists(image_path):
+                    self.window.output_log(f"目标图片文件 {image_path} 不存在，请检查路径！")
+                    return
+
+            # 仅在程序启动时显示一次GPU信息和其他初始化信息
+            if not self.window.has_shown_gpu_info:
+                if cuda_enabled:
+                    self.window.output_log("检测到CUDA支持，将使用GPU加速图像处理")
+                else:
+                    self.window.output_log("未检测到CUDA支持，将使用CPU进行图像处理")
+                
+                # 显示其他初始化提示信息
+                self.window.output_log("注意：请勿遮挡游戏窗口，否则可能导致识别失败或点击无效")
+                self.window.output_log("提示：按下F12同样可以停止程序")
+                self.window.output_log("该程序由哔哩哔哩‘简朴无谓’制作")
+                self.window.has_shown_gpu_info = True
+            # 不再在这里显示"已开始"，避免重复
+
+            # 使用定时器循环执行图片识别
+            self.timer = QTimer()
+            self.timer.timeout.connect(self.check_and_click)
+            interval = self.window.get_interval()
+            self.timer.start(interval * 1000)  # 转换为毫秒
+            
+            # 运行事件循环
+            self.loop = QEventLoop()
+            self.loop.exec_()
+            
+        except Exception as e:
+            self.window.output_log(f"程序运行出错: {str(e)}")
+    
+    def check_and_click(self):
+        if not self.running:
+            if self.timer:
+                self.timer.stop()
+            # 退出事件循环
+            if hasattr(self, 'loop'):
+                self.loop.quit()
+            return
+            
+        # 获取用户设置的间隔时间
+        interval = self.window.get_interval()
+        # 确保最低轮询间隔为5秒
+        if interval < 5:
+            interval = 5
+        # 更新定时器间隔
+        if self.timer and interval != self.timer.interval() / 1000:
+            self.timer.setInterval(interval * 1000)
+        
+        # 一次性查找所有图片
+        for image_path in self.image_paths:
+            if not self.running:
+                if self.timer:
+                    self.timer.stop()
+                # 退出事件循环
+                if hasattr(self, 'loop'):
+                    self.loop.quit()
+                break
+            print(f"正在查找图片: {os.path.basename(image_path)}")
+            self.image_finder.find_and_click_image(image_path)
+                
+    def stop(self):
+        self.running = False
+        if self.timer:
+            self.timer.stop()
+        # 退出事件循环
+        if hasattr(self, 'loop'):
+            self.loop.quit()
+
+
+def main():
+    try:
+        app = QApplication(sys.argv)
+        window = MainWindow()
+        window.show()
+        exit_code = app.exec_()
+        sys.exit(exit_code)
+    except Exception as e:
+        print(f"启动程序时出错: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
