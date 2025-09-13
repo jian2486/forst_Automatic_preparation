@@ -4,9 +4,13 @@ forts自动准备(Forst Automatic preparation)
 使用ai搭配pycharm写的，陈余代码和小bug没修
 我已打包好的程序是forts自动准备.exe**
 
+**程序仅支持windows，没有对其他系统进行适配**
+
 **This program can automatically identify the "Start", "Download" and "Prepare" buttons on the screen at the intervals specified by the user using OpenCV, and automatically move the mouse to click them. This is convenient for users to temporarily leave while the program takes care of starting the game and preparing, preventing being kicked out of the room.
 The program was written using AI and PyCharm, and Chen Yu's code and minor bugs have not been fixed.
 The packaged program I have is "forts automatic preparation.exe""**
+
+**The program is only compatible with Windows and has not been adapted for other systems.**
 
 **python 3.10**
 **openCV 4.12.0.88**
